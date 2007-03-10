@@ -17,6 +17,14 @@ class Node:
     cur.execute("SELECT fromNode FROM edges WHERE toNode = ?", (self._nid,))
     for (nid,) in cur:
       yield Node(nid, self._db)
+      
+  def GetInNodeByName( self, name ):
+    cur = self._db._conn.cursor()
+    cur.execute("SELECT nid FROM edges INNER JOIN nodes ON fromNode = nid WHERE toNode = ? AND name = ? ORDER BY nid ASC", (self._nid, name))
+    res = cur.fetchone()
+    if res is None:
+      raise KeyError(self._nid, name, "no in node with that name in the DB")
+    return Node(res[0], self._db)
 
   def GetOutNodes( self ):
     """Return a generator for all the nodes in the database this one links to. See TagaTagDB.GetNodes() for more information."""
@@ -24,6 +32,15 @@ class Node:
     cur.execute("SELECT toNode FROM edges WHERE fromNode = ?", (self._nid,))
     for (nid,) in cur:
       yield Node(nid, self._db)
+
+  def GetOutNodeByName( self, name ):
+    cur = self._db._conn.cursor()
+    cur.execute("SELECT nid FROM edges INNER JOIN nodes ON toNode = nid WHERE fromNode = ? AND name = ? ORDER BY nid ASC", (self._nid, name))
+    res = cur.fetchone()
+    if res is None:
+      raise KeyError(self._nid, name, "no out node with that name in the DB")
+    return Node(res[0], self._db)
+
 
   def GetNID( self ):
     return self._nid
@@ -40,7 +57,10 @@ class Node:
     if self._name is None:
       cur = self._db._conn.cursor()
       cur.execute("SELECT name, contentPath FROM nodes WHERE nid = ?", (self._nid,))
-      self._name, self._contentPath = cur.fetchone()
+      res = cur.fetchone()
+      if res is None:
+        raise KeyError(self._nid, "not an nid in the DB")
+      self._name, self._contentPath = res
     assert self._name is not None
     assert self._contentPath is not None
   
@@ -59,7 +79,8 @@ class TagaTagDB:
       cur.execute("INSERT INTO version_info (scheme) VALUES (1)")
 
       cur.execute("CREATE TABLE edges (fromNode INTEGER NOT NULL, toNode INTEGER NOT NULL, UNIQUE (fromNode, toNode))")
-      cur.execute("CREATE TABLE nodes (nid INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, contentPath VARCHAR(512) UNIQUE)")
+      cur.execute("CREATE TABLE nodes (nid INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, contentPath VARCHAR(512))")
+      self._conn.commit()
 
   def GetNodes( self ):
     """
@@ -101,19 +122,25 @@ class TagaTagDB:
 
   def GetNodeByContentPath( self, path ):
     """
-    Return a Node object for the node with contentPath == path.
+    Return a Node object for the first node with contentPath == path.
     """
     cur = self._conn.cursor()
-    cur.execute( "SELECT nid FROM nodes WHERE contentPath = ?", (path,) )
-    return Node(cur.fetchone()[0], self)
+    cur.execute( "SELECT nid FROM nodes WHERE contentPath = ? ORDER BY nid ASC LIMIT 1", (path,) )
+    try:
+      return Node(cur.fetchone()[0], self)
+    except TypeError:
+      raise KeyError(name, "not a content path in the DB")
 
   def GetNodeByName( self, name ):
     """
     Return a Node object for the first node with name == name.
     """
     cur = self._conn.cursor()
-    cur.execute( "SELECT nid FROM nodes WHERE name = ? LIMIT 1", (name,) )
-    return Node(cur.fetchone()[0], self)
+    cur.execute( "SELECT nid FROM nodes WHERE name = ? ORDER BY nid ASC LIMIT 1", (name,) )
+    try:
+      return Node(cur.fetchone()[0], self)
+    except TypeError:
+      raise KeyError(name, "not a name in the DB")
 
   def AddNode( self, name, contentPath ):
     """
@@ -121,9 +148,10 @@ class TagaTagDB:
     """
     cur = self._conn.cursor()
     cur.execute( "INSERT INTO nodes (name, contentPath) VALUES (?, ?)", (name, contentPath) )
-    cur.execute( "SELECT nid FROM nodes WHERE contentPath = ?", (contentPath,) )
+    #cur.execute( "SELECT nid FROM nodes WHERE contentPath = ?", (contentPath,) )
+    self._conn.commit()
 
-    return Node(cur.fetchone()[0], self)
+    return Node(cur.lastrowid, self)
 
   def AddLink( self, fromNode, toNode ):
     """
@@ -131,6 +159,7 @@ class TagaTagDB:
     """
     cur = self._conn.cursor()
     cur.execute( "INSERT INTO edges (fromNode, toNode) VALUES (?, ?)", (fromNode.GetNID(), toNode.GetNID()) )
+    self._conn.commit()
 
   def GetNodeCount( self ):
     cur = self._conn.cursor()
