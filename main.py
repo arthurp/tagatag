@@ -1,6 +1,4 @@
-from pysqlite2 import dbapi2 as sqlite
-
-import uuid
+import tagatagdb
 
 import os
 from os.path import isdir, islink
@@ -31,27 +29,7 @@ try:
 except Exception, e:
   print e
 
-conn = sqlite.connect("mydb")
-
-cur = conn.cursor()
-
-def SchemeVersion(cur):
-  try:
-    cur.execute("select * from version_info")
-    return cur.fetchone()[0]
-  except:
-    return 0
-
-if SchemeVersion(cur) < 1:
-  cur.execute("create table version_info (scheme integer)")
-  cur.execute("insert into version_info (scheme) values (1)")
-  cur.execute("create table links (fromnode char(45) not null, tonode char(45) not null)")
-  cur.execute("create table nodes (uuid char(45) unique, name varchar(128) not null, path varchar(512) unique, istag boolean not NULL)")
-
-assert SchemeVersion(cur) == 1, "Wrong scheme!"
-
-def UUID():
-  return uuid.uuid1().urn
+db = tagatagdb.TagaTagDB("mydb")
 
 import os
 from os.path import join, basename, abspath, normpath, dirname
@@ -63,18 +41,17 @@ def readnormlink(n):
   try:
     #dirname(str(n))
     #os.readlink(str(n))
-    return normpath( join( dirname(str(n)), os.readlink(str(n)) ) )
+    return normpath( abspath( join( dirname(str(n)), os.readlink(str(n)) ) ) )
   except Exception, e:
     #print e
-    return n
+    return normpath( abspath( n ) )
 
-def InsertDirectory(cur, path): 
-  cur.execute("insert into nodes (uuid, name, path, istag) values (?, ?, ?, ?)", (UUID(),basename(path),path, True))
+def InsertDirectory(path): 
+  firstrootNode = db.AddNode( basename(path), normpath(abspath(path)) )
   pathlinks = []
 
   for root, dirs, files in os.walk(path):
-    cur.execute("select uuid from nodes WHERE path = ?", (root,))
-    rootid = cur.fetchone()[0]
+    rootNode = db.GetNodeByContentPath(normpath(abspath(root)))
 
     for l in (dirs, files):
       for n in list(l):
@@ -83,73 +60,67 @@ def InsertDirectory(cur, path):
           pathlinks.append( ( root, normpath(join(root, os.readlink(p))) ) )
           l.remove(n)
 
-    add_files = [(UUID(),name,join(root, name), False) for name in files]
-    cur.executemany("insert into nodes (uuid, name, path, istag) values (?, ?, ?, ?)", add_files)
+    newNodes = []
+    for name in files + dirs:
+      newNodes.append( db.AddNode( name, normpath(abspath(join(root, name))) ) )
 
-    add_dirs = [(UUID(),name,join(root, name), True) for name in dirs]
-    cur.executemany("insert into nodes (uuid, name, path, istag) values (?, ?, ?, ?)", add_dirs)
-
-    #print root, rootid
-
-    add_links = [(rootid, x) for x in unzip(add_files, 0) + unzip(add_dirs, 0)]
-    #print add_links
-    cur.executemany("insert into links (fromnode, tonode) values (?, ?)", add_links )
-
+    for node in newNodes:
+      db.AddLink( rootNode, node )
+  
   print pathlinks
   for frm, to in pathlinks:
     print to, readnormlink(to), frm, readnormlink(frm)
-    cur.execute("select uuid from nodes WHERE path = ?", (readnormlink(frm),))
-    frmid = cur.fetchone()[0]
-    cur.execute("select uuid from nodes WHERE path = ?", (readnormlink(to),))
-    toid = cur.fetchone()[0]
-    cur.execute("insert into links (fromnode, tonode) values (?, ?)", (frmid, toid) )
+    db.AddLink( db.GetNodeByContentPath(readnormlink(frm)), db.GetNodeByContentPath(readnormlink(to)) )
     
 
-def MakeSymlinkTree(cur, path):
+def MakeSymlinkTree(path):
   renames = {}
 
-  cur.execute("SELECT name, uuid FROM nodes WHERE istag = 1")
-  for (tag,uid) in cur:
-    print "makedirs", join(path, tag)
-    try:
-      os.makedirs( join(path, tag) )
-      renames[uid] = tag
-    except:
-      os.makedirs( join(path, tag+"~"+uid) )
-      renames[uid] = tag+"~"+uid
+  def nodeDirName(node):
+    return node.GetName()+"~"+str(node.GetNID())  
 
-  cur.execute("SELECT fnodes.uuid, fnodes.name, tnodes.name, tnodes.path, tnodes.istag FROM nodes AS fnodes, links, nodes AS tnodes WHERE fnodes.uuid = links.fromnode AND links.tonode = tnodes.uuid")
-  for frmid, frm, to, topath, toistag in cur:
-    linkname = join(path, renames[frmid], to)
-    if toistag:
-      print "symlink", join(os.pardir, to), linkname
-      os.symlink( join(os.pardir, to), linkname )
-    else:
-      print "symlink", abspath(topath), linkname
-      os.symlink( abspath(topath), linkname )
+  for node in db.GetNodes():
+    dname = join(path, nodeDirName(node))
+    indname = join(dname, "...")
+    print "makedirs", indname
+    os.makedirs( indname )
+
+    contentPath = abspath(node.GetContentPath())
+    print "symlink", contentPath, "content"
+    os.symlink( contentPath, join(dname, "content") )
+
+    for outnode in node.GetOutNodes():
+      target = join(os.pardir, nodeDirName(outnode))
+      source = join( dname, outnode.GetName() )
+      print "symlink", target, source
+      os.symlink( target, source )      
+
+    for innode in node.GetInNodes():
+      target = join(os.pardir, os.pardir, nodeDirName(innode))
+      source = join( indname, innode.GetName() )
+      print "symlink", target, source
+      os.symlink( target, source )      
 
 import yapgvb
 
-def MakeGraph(cur):
+def MakeGraph():
   graph = yapgvb.Digraph("Tags")
   nodes = {}
 
-  cur.execute("SELECT uuid, name, CASE istag WHEN 1 THEN 'black' ELSE 'blue' END 'istag' FROM nodes")
-  for itemid, name, color in cur:
-    nodes[itemid] = graph.add_node( str(itemid), label=str(name), color=color, URL=itemid )
+  for node in db.GetNodes():
+    nodes[node.GetNID()] = graph.add_node( str(node.GetNID()), label=str(node.GetName()))
 
-  cur.execute("SELECT fnodes.uuid, tnodes.uuid FROM nodes AS fnodes, links, nodes AS tnodes WHERE fnodes.uuid = links.fromnode AND links.tonode = tnodes.uuid")
-  for frm, to in cur:
-    graph.add_edge( nodes[frm], nodes[to] )
+  for (frm, to) in db.GetLinks():
+    graph.add_edge( nodes[frm.GetNID()], nodes[to.GetNID()] )
 
   return graph
 
-InsertDirectory( cur, "test" )
-conn.commit()
+InsertDirectory( "test" )
+db.commit()
 
-MakeSymlinkTree( cur, "linktree" )
+MakeSymlinkTree( "linktree" )
 
-g = MakeGraph(cur)
+g = MakeGraph()
 g.layout(yapgvb.engines.dot)
 g.write()
 g.render('out.svg')
