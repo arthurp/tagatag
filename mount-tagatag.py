@@ -326,10 +326,10 @@ class TagaTag(Fuse):
     Feel free to set any of the above values to 0, which tells
     the kernel that the info is not available.
     """
-    print "TagaTag:statfs:"
-    blocks_size = 0
-    blocks = 0
-    blocks_free = 0
+    print "TagaTag:statfs:", self.openDB().GetNodeCount(), type(self.openDB().GetNodeCount())
+    blocks_size = 1024
+    blocks = self.openDB().GetNodeCount()
+    blocks_free = 9223372036854775807 - blocks
     files = self.openDB().GetNodeCount()
     files_free = 9223372036854775807 - files
     namelen = 80
